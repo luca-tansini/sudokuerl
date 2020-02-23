@@ -110,3 +110,42 @@ update_squares_data_test() ->
     [Num] = maps:get({5,6}, NewFreePos),
     [{5,6}, {6,4}] = maps:get(Num, NewMissingDigits).
 
+get_quad_from_pos_test() ->
+    1 = sudokuerl:get_square_from_pos(3, {1,1}),
+    1 = sudokuerl:get_square_from_pos(3, {3,3}),
+    4 = sudokuerl:get_square_from_pos(2, {3,3}),
+    2 = sudokuerl:get_square_from_pos(3, {3,4}),
+    4 = sudokuerl:get_square_from_pos(3, {4,3}),
+    5 = sudokuerl:get_square_from_pos(3, {5,5}),
+    3 = sudokuerl:get_square_from_pos(3, {3,7}),
+    9 = sudokuerl:get_square_from_pos(3, {7,7}).
+
+insert_test() ->
+    Sudoku = sudokuerl:read_sudoku("test/sudoku.txt"),
+    SquaresData = sudokuerl:empty_squares_data(Sudoku),
+    Num = 4,
+    Pos = {2,1},
+    SqNum = sudokuerl:get_square_from_pos(maps:get(sqrt, Sudoku), Pos),
+    {FreePos, MissingDigits} = maps:get(SqNum, SquaresData),
+    
+    % handcraft some data
+    HandCraftMissingDigits1 = maps:update(2, [{2,1},{3,1}], MissingDigits),
+    HandCraftMissingDigits2 = 
+        maps:update(6, [{1,2},{2,1}], HandCraftMissingDigits1),
+    HandCraftMissingDigits3 = maps:update(8, [{2,2}], HandCraftMissingDigits2),
+    HandCraftFreePos = maps:update(Pos, [2,4,6,8], FreePos),
+    HandCraftSquaresData = maps:update(SqNum,
+                                       {HandCraftFreePos,
+                                        HandCraftMissingDigits3},
+                                       SquaresData),
+    
+    {NewSudoku, NewSquaresData} =
+        sudokuerl:insert(Sudoku, Num, Pos, HandCraftSquaresData),
+    Num = maps:get(Pos, NewSudoku),
+    {NewFreePos, NewMissingDigits} = maps:get(SqNum, NewSquaresData),
+    undefined = maps:get(Pos, NewFreePos, undefined),
+    undefined = maps:get(Num, NewMissingDigits, undefined),
+    [{3,1}] = maps:get(2, NewMissingDigits),
+    [{1,2}] = maps:get(6, NewMissingDigits),
+    [{2,2}] = maps:get(8, NewMissingDigits).
+

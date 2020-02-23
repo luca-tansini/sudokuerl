@@ -67,8 +67,42 @@ squares_loop(Sudoku, Num, NSquare, Side, SquaresData) ->
     end.
 
 insert(Sudoku, Num, Pos, SquaresData) ->
-    % TODO
-    ok.
+    % riempio nel sudoku la posizone corrispondente
+    NewSudoku = maps:put(Pos, Num, Sudoku),
+
+    % rimuovo la posizione da FreePos, che implica l'andare a rimuovere da
+    % MissingDigits la posizione di tutti i numeri trovati in FreePos
+    % (Num compreso)
+    SqNum = get_square_from_pos(maps:get(sqrt, Sudoku), Pos),
+    {FreePos, MissingDigits} = maps:get(SqNum, SquaresData),
+    DigitsInPos = maps:get(Pos, FreePos),
+    NewFreePos = maps:remove(Pos, FreePos),
+    MissingDigits1 = lists:foldl(
+        fun(Digit, TmpMissingDigits) ->
+            maps:update_with(Digit, fun(L) -> lists:delete(Pos,L) end,
+                             TmpMissingDigits)
+        end,
+        MissingDigits,
+        DigitsInPos
+    ),
+
+    % rimuovo completamente Num dalla mappa MissingDigits
+    MissingDigits2 = maps:remove(Num, MissingDigits1),
+
+    NewSquaresData = 
+        maps:update(SqNum, {NewFreePos, MissingDigits2}, SquaresData),
+
+    % guardo in tutti i quadranti che hanno in comune la riga o la colonna
+    % ed elimino eventuali possibili posizioni trovate per lo stesso numero
+    % cioè: genero tutte le posizioni che hanno in comune la riga o la colonna
+    % con Pos, per ogni posizione vado nel quadrante e, se trovo la posizione
+    % in FreePos e se c'è dentro il numero in questione, lo elimino da quel
+    % FreePos e vado ad eliminare quella Pos anche dal MissingDigits
+
+    % Cerco in tutti i quadranti coinvolti se adesso ci sia qualche numero con
+    % una sola posizione possibile e nel caso ripeto l'INSERIMENTO
+
+    {NewSudoku, NewSquaresData}.
 
 update_squares_data(_NSquare, _Num, [], SquaresData) -> SquaresData;
 update_squares_data(NSquare, Num, [NewPos|TL], SquaresData) ->
@@ -234,6 +268,9 @@ get_sudoku_square(Sudoku, SqNum) ->
         I <- lists:seq(0, Sqrt-1),
         J <- lists:seq(0, Sqrt-1)].
 
+% function that from a position return the quadrant number
+get_square_from_pos(Sqrt, {I,J}) ->
+    ((I-1) div Sqrt) * Sqrt + 1 + ((J-1) div Sqrt).
 
 %%==============================================================================
 %% I/O functions
