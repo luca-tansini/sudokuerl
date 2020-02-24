@@ -20,6 +20,16 @@ main(Args) ->
     end,
     Sudoku = read_sudoku(In),
     print_sudoku(Sudoku),
+    try solve(Sudoku) of
+        never_here -> ok
+    catch
+        {win, CompletedSudoku} ->
+            io:format("Sudoku Completed!\n"),
+            print_sudoku(CompletedSudoku);
+            % TODO: also write to outfile
+        invalid_sudoku ->
+            io:format("The sudoku was incorrect (or something went wrong)\n")
+    end,
     erlang:halt(0).
 
 %%==============================================================================
@@ -27,20 +37,60 @@ main(Args) ->
 %%==============================================================================
 
 solve(Sudoku) ->
-    % build digit count map
     SortedOccurences = sorted_occurrences(Sudoku),
     SquaresData = empty_squares_data(Sudoku),
-    solve_loop(Sudoku, SortedOccurences, SquaresData),
-    ok.
+    solve_loop(Sudoku, SortedOccurences, SquaresData).
 
-solve_loop(Sudoku, [], SquaresData) -> SquaresData;
-solve_loop(Sudoku, [{Num,_Occ}|SortedOccTL], SquaresData) ->
+solve_loop(Sudoku, [], SquaresData) ->
+    % when we reach the end of the list it can only happen that
+    % we have to guess between possibilites
+    % TODO: guessing part
+    todo_guessing;
+solve_loop(Sudoku, [{Num,_Occ}|TL], SquaresData) ->
+
+    % io:format("DEBUG: solve_loop with Num:~p~n", [Num]),
+
     Side = maps:get(side, Sudoku),
-    NewSquaresData = squares_loop(Sudoku, Num, 1, Side, SquaresData),
-    ok.
+    {NewSudoku, NewSquaresData} =
+        squares_loop(Sudoku, Num, 1, Side, SquaresData),
+
+    % recalculate the occurrences
+    NewSortedOcc = sorted_occurrences(NewSudoku),
+
+    % io:format("DEBUG: NewSortedOcc: ~p~n", [NewSortedOcc]),
+
+    case proplists:get_value(Num, NewSortedOcc) of
+        Side ->
+            % the number is full, we move on to the next one
+            ok;
+        _ ->
+            % the number is not full. We have to check,
+            % if it cannot go anywhere, the sudoku is wrong
+            check_if_wrong(Num, NewSquaresData)
+    end,
+
+    % move on to the next most frequent number (that wasn't used before (TL))
+    NewSortedOcc1 = [{N,Occ} || {N,Occ} <- NewSortedOcc,
+                                proplists:is_defined(N, TL)],
+
+    % io:format("DEBUG: NewSortedOcc1: ~p~n", [NewSortedOcc1]),
+
+    solve_loop(NewSudoku, NewSortedOcc1, NewSquaresData).
+
+check_if_wrong(Num, SquaresData) ->
+    case lists:foldl(
+        fun({_SqNum, {_FreePos, MissingDigits}}, Count) ->
+            Count + length(maps:get(Num, MissingDigits, []))
+        end,
+        0,
+        maps:to_list(SquaresData)
+    ) of
+        0 -> throw(invalid_sudoku);
+        _ -> ok
+    end.
 
 squares_loop(Sudoku, Num, NSquare, Side, SquaresData) when NSquare > Side ->
-    SquaresData;
+    {Sudoku, SquaresData};
 squares_loop(Sudoku, Num, NSquare, Side, SquaresData) ->
     {FreePos, MissingDigits} = maps:get(NSquare, SquaresData),
     % check whether Num is already in square
@@ -56,9 +106,19 @@ squares_loop(Sudoku, Num, NSquare, Side, SquaresData) ->
                 0 -> 
                     throw(invalid_sudoku);
                 1 ->
-                    insert(Sudoku, Num, hd(AvailablePositions), SquaresData),
-                    % TODO
-                    more;
+                    {NewSudoku, NewSquaresData} = 
+                        insert(Sudoku, Num,
+                               hd(AvailablePositions), SquaresData),
+                    
+                    % when we return from insert check if we won
+                    case check_sudoku(NewSudoku) of
+                        full ->
+                            throw({win, NewSudoku});
+                        ok ->
+                            % if we didn't win, move on to the next square
+                            squares_loop(NewSudoku, Num, NSquare+1, 
+                                         Side, NewSquaresData)
+                    end;
                 _ ->
                     NewSquaresData = update_squares_data(NSquare, Num,
                                             AvailablePositions, SquaresData),
@@ -67,12 +127,20 @@ squares_loop(Sudoku, Num, NSquare, Side, SquaresData) ->
     end.
 
 insert(Sudoku, Num, Pos, SquaresData) ->
-    % riempio nel sudoku la posizone corrispondente
-    NewSudoku = maps:put(Pos, Num, Sudoku),
 
-    % rimuovo la posizione da FreePos, che implica l'andare a rimuovere da
-    % MissingDigits la posizione di tutti i numeri trovati in FreePos
-    % (Num compreso)
+    io:format("\n**************************************\n"),
+    io:format("insert(Sudoku, ~p, ~p, SquaresData)\n", [Num, Pos]),
+    io:format("where Sudoku:\n"),
+    print_sudoku(Sudoku),
+    % io:format("and SquaresData:\n"),
+    % io:format("~p~n", [SquaresData]),
+    io:format("**************************************\n"),
+
+    % fill Pos with Num in the Sudoku
+    NewSudoku1 = maps:put(Pos, Num, Sudoku),
+
+    % remove Pos from FreePos in its quadrant. Also remove from MissingDigits
+    % all numbers found in Pos (Num included, it's ok).
     SqNum = get_square_from_pos(maps:get(sqrt, Sudoku), Pos),
     {FreePos, MissingDigits} = maps:get(SqNum, SquaresData),
     DigitsInPos = maps:get(Pos, FreePos),
@@ -86,23 +154,139 @@ insert(Sudoku, Num, Pos, SquaresData) ->
         DigitsInPos
     ),
 
-    % rimuovo completamente Num dalla mappa MissingDigits
+    % completely remove Num from MissingDigit
     MissingDigits2 = maps:remove(Num, MissingDigits1),
 
-    NewSquaresData = 
+    NewSquaresData1 = 
         maps:update(SqNum, {NewFreePos, MissingDigits2}, SquaresData),
 
-    % guardo in tutti i quadranti che hanno in comune la riga o la colonna
-    % ed elimino eventuali possibili posizioni trovate per lo stesso numero
-    % cioè: genero tutte le posizioni che hanno in comune la riga o la colonna
-    % con Pos, per ogni posizione vado nel quadrante e, se trovo la posizione
-    % in FreePos e se c'è dentro il numero in questione, lo elimino da quel
-    % FreePos e vado ad eliminare quella Pos anche dal MissingDigits
+    % search all positions that share the row or column wih Pos and delete
+    % Num from any FreePos found this way. If Num is found we also have to
+    % update the MissingDigits field for the Square
+    {Row,Col} = Pos,
+    NewSquaresData2 =
+        update_same_row_data(NewSudoku1, Row, Num, NewSquaresData1),
+    NewSquaresData3 =
+        update_same_col_data(NewSudoku1, Col, Num, NewSquaresData2),
 
-    % Cerco in tutti i quadranti coinvolti se adesso ci sia qualche numero con
-    % una sola posizione possibile e nel caso ripeto l'INSERIMENTO
+    % check how many digits are missing from the row and the col
+    % if it's just 1 we have a free insert
+    {NewSudoku2, NewSquaresData4} =
+        case check_row_missing_one_digit(NewSudoku1, Row) of
+            {FDigitRow, FPosRow} ->
+                insert(NewSudoku1, FDigitRow, FPosRow, NewSquaresData3);
+            _ -> {NewSudoku1, NewSquaresData3}
+        end,
 
-    {NewSudoku, NewSquaresData}.
+    {NewSudoku3, NewSquaresData5} =
+        case check_col_missing_one_digit(NewSudoku2, Col) of
+            {FDigitCol, FPosCol} ->
+                insert(NewSudoku2, FDigitCol, FPosCol, NewSquaresData4);
+            _ -> {NewSudoku2, NewSquaresData4}
+        end,
+
+    % io:format("DEBUG: NewSquaresData5:\n"),
+    % io:format("~p~n", [NewSquaresData5]),
+
+    % search all squares for MissingDigits with only 1 entry.
+    % When we find one, we recursively call insert
+    {NewSudoku4, NewSquaresData6} = lists:foldl(
+        fun(N, {AccSudoku, AccSquaresData}) ->
+            check_can_insert_sq(AccSudoku, N, AccSquaresData)
+        end,
+        {NewSudoku3, NewSquaresData5},
+        lists:seq(1,maps:get(side, Sudoku))
+    ),
+
+    {NewSudoku4, NewSquaresData6}.
+
+check_row_missing_one_digit(Sudoku, Row) ->
+    Side = maps:get(side, Sudoku),
+    RawRow = get_sudoku_row(Sudoku, Row),
+    case lists:seq(1,Side) -- RawRow of
+        [MissingDigit] ->
+            Col = find_first(0, RawRow, 1),
+            {MissingDigit, {Row, Col}};
+        _ ->
+            false
+    end.
+
+check_col_missing_one_digit(Sudoku, Col) ->
+    Side = maps:get(side, Sudoku),
+    RawCol = get_sudoku_col(Sudoku, Col),
+    case lists:seq(1,Side) -- RawCol of
+        [MissingDigit] ->
+            Row = find_first(0, RawCol, 1),
+            {MissingDigit, {Row, Col}};
+        _ ->
+            false
+    end.
+
+% positions start from 1
+find_first(N, [N|TL], Pos) -> Pos;
+find_first(N, [_|TL], Pos) -> find_first(N, TL, Pos+1).
+
+check_can_insert_sq(Sudoku, SqNum, SquaresData) ->
+    {_, MissingDigits} = maps:get(SqNum, SquaresData),
+    lists:foldl(
+        fun(MissingDigit, {AccSudoku, AccSquaresData}) ->
+            {_, AccMissingDigits} = maps:get(SqNum, AccSquaresData),
+            % it can be that we come back here after a recursive call so
+            % the key might not be in the map anymore. So we return a list
+            % that will not be used
+            case maps:get(MissingDigit, AccMissingDigits, not_found) of
+                [Pos] ->
+                    insert(AccSudoku, MissingDigit, Pos, AccSquaresData);
+                _ -> {AccSudoku, AccSquaresData}
+            end
+        end,
+        {Sudoku, SquaresData},
+        maps:keys(MissingDigits)
+    ).
+
+update_same_row_data(Sudoku, Row, Num, SquaresData) ->
+    lists:foldl(
+        fun(N, AccSquaresData) ->
+            remove_free_pos_from_data(Sudoku, {Row,N}, Num, AccSquaresData) 
+        end,
+        SquaresData,
+        lists:seq(1,maps:get(side, Sudoku))
+    ).
+
+update_same_col_data(Sudoku, Col, Num, SquaresData) ->
+    lists:foldl(
+        fun(N, AccSquaresData) ->
+            remove_free_pos_from_data(Sudoku, {N, Col}, Num, AccSquaresData) 
+        end,
+        SquaresData,
+        lists:seq(1,maps:get(side, Sudoku))
+    ).
+
+remove_free_pos_from_data(Sudoku, Pos, Num, SquaresData) ->
+    TSqNum = get_square_from_pos(maps:get(sqrt, Sudoku), Pos),
+    {FreePos, MissingDigits} = maps:get(TSqNum, SquaresData),
+    case maps:get(Pos, FreePos, undefined) of
+        undefined -> SquaresData;
+        L ->
+            case lists:member(Num, L) of
+                false -> SquaresData;
+                true ->
+                    NewFreePos = maps:update(Pos, L--[Num], FreePos),
+                    NewMissingDigits =
+                        % it may be that we already removed the number
+                        % from the missing digits map
+                        case maps:is_key(Num, MissingDigits) of
+                            false -> MissingDigits;
+                            true ->
+                                maps:update_with(Num, 
+                                                 fun(L1) -> L1--[Pos] end,
+                                                 MissingDigits)
+                        end,
+                    maps:update(TSqNum, {NewFreePos, NewMissingDigits},
+                                SquaresData)
+            end
+    end.
+
 
 update_squares_data(_NSquare, _Num, [], SquaresData) -> SquaresData;
 update_squares_data(NSquare, Num, [NewPos|TL], SquaresData) ->
@@ -171,8 +355,8 @@ sorted_occurrences(Sudoku) ->
         Empty,
         lists:seq(1,Side)
     ),
-    Occurrences = [X || X <- maps:to_list(Map), X =/= 0],
-    lists:sort(fun({A1,A2},{B1,B2}) -> {A2,A1} >= {B2,B1} end, Occurrences).
+    lists:sort(fun({A1,A2},{B1,B2}) -> {A2,A1} >= {B2,B1} end,
+               maps:to_list(Map)).
 
 count_digits_in_row(Sudoku, N, DGCountMap) ->
     lists:foldl(

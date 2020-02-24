@@ -125,27 +125,65 @@ insert_test() ->
     SquaresData = sudokuerl:empty_squares_data(Sudoku),
     Num = 4,
     Pos = {2,1},
+
+    {NewSudoku, _NewSquaresData} =
+        sudokuerl:insert(Sudoku, Num, Pos, SquaresData),
+    Num = maps:get(Pos, NewSudoku).
+
+update_same_row_col_test() ->
+    Sudoku = sudokuerl:read_sudoku("test/sudoku.txt"),
+    SquaresData = sudokuerl:empty_squares_data(Sudoku),
+    Pos = {2,1},
+    
+    % handcraft some data for square 1
     SqNum = sudokuerl:get_square_from_pos(maps:get(sqrt, Sudoku), Pos),
     {FreePos, MissingDigits} = maps:get(SqNum, SquaresData),
-    
-    % handcraft some data
     HandCraftMissingDigits1 = maps:update(2, [{2,1},{3,1}], MissingDigits),
     HandCraftMissingDigits2 = 
         maps:update(6, [{1,2},{2,1}], HandCraftMissingDigits1),
     HandCraftMissingDigits3 = maps:update(8, [{2,2}], HandCraftMissingDigits2),
     HandCraftFreePos = maps:update(Pos, [2,4,6,8], FreePos),
-    HandCraftSquaresData = maps:update(SqNum,
-                                       {HandCraftFreePos,
-                                        HandCraftMissingDigits3},
-                                       SquaresData),
+
+    HandCraftSquaresData1 = maps:update(SqNum,
+                                        {HandCraftFreePos,
+                                         HandCraftMissingDigits3},
+                                        SquaresData),
+
+    % handcraft some data for square 2 (number 4 shouldn't go there, but whatev)
+    {Sq2FreePos, Sq2MissingDigits} = maps:get(2, SquaresData),
+    HandCraftSq2FreePos2 = maps:update({2,5}, [4,3], Sq2FreePos),
+    HandCraftSq2FreePos3 = maps:update({2,6}, [4], HandCraftSq2FreePos2),
+    HandCraftSq2MissingDigits2 = maps:put(4, [{2,5}, {2,6}], Sq2MissingDigits),
+
+    HandCraftSquaresData2 = maps:update(2,
+                                        {HandCraftSq2FreePos3,
+                                         HandCraftSq2MissingDigits2},
+                                        HandCraftSquaresData1),
+
+    % handcraft some data for square 7
+    {Sq7FreePos, Sq7MissingDigits} = maps:get(7, SquaresData),
+    HandCraftSq7FreePos2 = maps:update({7,1}, [4,7], Sq7FreePos),
+    HandCraftSq7FreePos3 = maps:update({8,1}, [4], HandCraftSq7FreePos2),
+    HandCraftSq7MissingDigits2 = maps:put(4, [{7,1}, {8,1}], Sq7MissingDigits),
+
+    HandCraftSquaresData = maps:update(7,
+                                       {HandCraftSq7FreePos3,
+                                        HandCraftSq7MissingDigits2},
+                                       HandCraftSquaresData2),
     
-    {NewSudoku, NewSquaresData} =
-        sudokuerl:insert(Sudoku, Num, Pos, HandCraftSquaresData),
-    Num = maps:get(Pos, NewSudoku),
-    {NewFreePos, NewMissingDigits} = maps:get(SqNum, NewSquaresData),
-    undefined = maps:get(Pos, NewFreePos, undefined),
-    undefined = maps:get(Num, NewMissingDigits, undefined),
-    [{3,1}] = maps:get(2, NewMissingDigits),
-    [{1,2}] = maps:get(6, NewMissingDigits),
-    [{2,2}] = maps:get(8, NewMissingDigits).
+    % try the update row procedure
+    RowSquaresData = sudokuerl:update_same_row_data(Sudoku, 2, 4,
+                                                    HandCraftSquaresData),
+    {NewSq2FreePos, NewSq2MissingDigits} = maps:get(2, RowSquaresData),
+    [3] = maps:get({2,5}, NewSq2FreePos),
+    [] = maps:get({2,6}, NewSq2FreePos),
+    [] = maps:get(4, NewSq2MissingDigits),
+
+    % try the update col procedure
+    ColSquaresData = sudokuerl:update_same_col_data(Sudoku, 1, 4,
+                                                    HandCraftSquaresData),
+    {NewSq7FreePos, NewSq7MissingDigits} = maps:get(7, ColSquaresData),
+    [7] = maps:get({7,1}, NewSq7FreePos),
+    [] = maps:get({8,1}, NewSq7FreePos),
+    [] = maps:get(4, NewSq7MissingDigits).
 
