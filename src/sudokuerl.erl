@@ -20,9 +20,7 @@ main(Args) ->
     end,
     Sudoku = read_sudoku(In),
     print_sudoku(Sudoku),
-    try solve(Sudoku) of
-        never_here -> ok
-    catch
+    case solve(Sudoku) of
         {win, CompletedSudoku} ->
             io:format("Sudoku Completed!\n"),
             print_sudoku(CompletedSudoku),
@@ -33,7 +31,7 @@ main(Args) ->
                     print_sudoku(CompletedSudoku, Fd)
             end;
         invalid_sudoku ->
-            io:format("The sudoku was incorrect\n")
+            io:format("The input sudoku is incorrect!\n")
     end,
     erlang:halt(0).
 
@@ -43,57 +41,46 @@ main(Args) ->
 
 solve(Sudoku) ->
     SortedOccurences = sorted_occurrences(Sudoku),
-    SquaresData = empty_squares_data(Sudoku),
-    solve_loop(Sudoku, SortedOccurences, SquaresData).
+    EmptySquaresData = empty_squares_data(Sudoku),
+    % build the possibilities data structures (SquaresData)
+    % while applying the heuristic to fill the sudoku without guessing
+    try 
+        {Sudoku1, SquaresData} = build_possibilities(Sudoku, SortedOccurences,
+                                                     EmptySquaresData),
+        % if we didn't complete the sudoku while building the map
+        % we need to guess using backtracking
+        backtracking(Sudoku1, SquaresData)
+    catch
+        {win, CompletedSudoku} -> {win, CompletedSudoku};
+        invalid_sudoku -> invalid_sudoku
+    end.
 
-solve_loop(Sudoku, [], SquaresData) ->
-    % when we reach the end of the list it can only happen that
-    % we have to guess between possibilites
-    
+%%==============================================================================
+%% backtracking functions
+%%==============================================================================
+
+% this function never returns
+backtracking(Sudoku, SquaresData) ->
     {Pos, Nums} = find_best_guess(SquaresData),
-    % io:format("guessing: ~p\n", [{Pos, Nums}]),
-    io:format("."),
 
     lists:foreach(
         fun(Num) ->
-            try insert(Sudoku, Num, Pos, SquaresData) of
-                {NewSudoku, NewSquaresData} ->
-                    solve_loop(NewSudoku, [], NewSquaresData)
+            try
+                {NewSudoku, NewSquaresData} = insert(Sudoku, Num, Pos,
+                                                     SquaresData),
+                backtracking(NewSudoku, NewSquaresData)
             catch
-                invalid_sudoku ->
-                    % io:format("invalid, backtracking\n"),
-                    io:format("\b"),
-                    ok
+                invalid_sudoku -> try_next
             end
         end,
         Nums
     ),
-    invalid_sudoku;
-solve_loop(Sudoku, [{Num,_Occ}|TL], SquaresData) ->
+    % if we reach the end of a list of possible positions
+    % the guess was wrong or the sudoku was impossible
+    throw(invalid_sudoku).
 
-    Side = maps:get(side, Sudoku),
-    {NewSudoku, NewSquaresData} =
-        squares_loop(Sudoku, Num, 1, Side, SquaresData),
-
-    % recalculate the occurrences
-    NewSortedOcc = sorted_occurrences(NewSudoku),
-
-    case proplists:get_value(Num, NewSortedOcc) of
-        Side ->
-            % the number is full, we move on to the next one
-            ok;
-        _ ->
-            % the number is not full. We have to check,
-            % if it cannot go anywhere, the sudoku is wrong
-            check_if_wrong(Num, NewSquaresData)
-    end,
-
-    % move on to the next most frequent number (that wasn't used before (TL))
-    NewSortedOcc1 = [{N,Occ} || {N,Occ} <- NewSortedOcc,
-                                proplists:is_defined(N, TL)],
-
-    solve_loop(NewSudoku, NewSortedOcc1, NewSquaresData).
-
+% find best guess tries to minimize backtracking by
+% prioritizing guesses with fewer possibilities
 find_best_guess(SquaresData) ->
     L = lists:foldl(
         fun({_,{FreePos,_}}, Acc) ->
@@ -108,19 +95,31 @@ find_best_guess(SquaresData) ->
                     end, L),
     Guess.
 
-check_if_wrong(Num, SquaresData) ->
-    case lists:foldl(
-        fun({_SqNum, {_FreePos, MissingDigits}}, Count) ->
-            Count + length(maps:get(Num, MissingDigits, []))
-        end,
-        0,
-        maps:to_list(SquaresData)
-    ) of
-        0 -> throw(invalid_sudoku);
-        _ -> ok
-    end.
+%%==============================================================================
+%% functions to build SquaresData (possibilities map)
+%%==============================================================================
 
-squares_loop(Sudoku, Num, NSquare, Side, SquaresData) when NSquare > Side ->
+build_possibilities(Sudoku, [], SquaresData) ->
+    {Sudoku, SquaresData};
+build_possibilities(Sudoku, [{Num,_Occ}|TL], SquaresData) ->
+
+    Side = maps:get(side, Sudoku),
+    {NewSudoku, NewSquaresData} =
+        squares_loop(Sudoku, Num, 1, Side, SquaresData),
+
+    % recalculate the occurrences
+    NewSortedOcc = sorted_occurrences(NewSudoku),
+
+    % move on to the next most frequent number (that wasn't used before (TL))
+    NewSortedOcc1 = [{N,Occ} || {N,Occ} <- NewSortedOcc,
+                                proplists:is_defined(N, TL)],
+
+    build_possibilities(NewSudoku, NewSortedOcc1, NewSquaresData).
+
+% function that for each square builds the SquaresData for the given Number
+% and also performs an insert when a number with only 1 possible position
+% in the square is found
+squares_loop(Sudoku, _Num, NSquare, Side, SquaresData) when NSquare > Side ->
     {Sudoku, SquaresData};
 squares_loop(Sudoku, Num, NSquare, Side, SquaresData) ->
     {FreePos, MissingDigits} = maps:get(NSquare, SquaresData),
@@ -137,32 +136,92 @@ squares_loop(Sudoku, Num, NSquare, Side, SquaresData) ->
                 0 -> 
                     throw(invalid_sudoku);
                 1 ->
+                    % only 1 possible position, we insert!
                     {NewSudoku, NewSquaresData} = 
-                        insert(Sudoku, Num,
-                               hd(AvailablePositions), SquaresData),
-                    
-                    % when we return from insert check if we won
-                    case check_sudoku(NewSudoku) of
-                        full ->
-                            throw({win, NewSudoku});
-                        ok ->
-                            % if we didn't win, move on to the next square
-                            squares_loop(NewSudoku, Num, NSquare+1, 
-                                         Side, NewSquaresData)
-                    end;
+                        insert(Sudoku,Num, hd(AvailablePositions), SquaresData),
+                    squares_loop(NewSudoku,Num,NSquare+1, Side, NewSquaresData);
                 _ ->
+                    % more than 1 position, go ahead
                     NewSquaresData = update_squares_data(NSquare, Num,
                                             AvailablePositions, SquaresData),
                     squares_loop(Sudoku, Num, NSquare+1, Side, NewSquaresData)
             end
     end.
 
+% this function determines whether a number can go in a certain position inside
+% a square (assuming it is not already in the square) by looking at the row and
+% the column of the position.
+find_available_positions(_Sudoku, _Num, [], Acc) -> lists:reverse(Acc);
+find_available_positions(Sudoku, Num, [Pos={I,J}|TL], Acc) ->
+    case 
+        (check_rules([Num]++get_sudoku_row(Sudoku,I)) =/= invalid) and
+        (check_rules([Num]++get_sudoku_col(Sudoku,J)) =/= invalid) of
+
+        true -> find_available_positions(Sudoku, Num, TL, [Pos|Acc]);
+        false -> find_available_positions(Sudoku, Num, TL, Acc)
+    end.
+
+% this function builds a map that for every square holds
+% a tuple {FreePos, MissingDigits} where:
+% - FreePos is a map mapping free positions to a list of numbers that could
+%   take that position
+% - MissingDigits is a map mapping digits that are not present in the square
+%   to the list of positions that digit could take
+empty_squares_data(Sudoku) ->
+    Side = maps:get(side, Sudoku),
+    Sqrt = maps:get(sqrt, Sudoku),
+    lists:foldl(
+        fun(SqNum, Acc) ->
+            % generate all possible positions for the square and check
+            % whether they are empty or not
+            FirstRow = 1 + ((SqNum-1) div Sqrt) * Sqrt,
+            FirstCol = 1 + ((SqNum-1) rem Sqrt) * Sqrt,
+            FreePos = maps:from_list([
+                {{FirstRow+I, FirstCol+J}, []} ||
+                I <- lists:seq(0, Sqrt-1),
+                J <- lists:seq(0, Sqrt-1),
+                maps:get({FirstRow+I, FirstCol+J}, Sudoku) == 0
+            ]),
+            % missing digits are easy to find with -- operator
+            Missing = lists:seq(1,Side) -- get_sudoku_square(Sudoku, SqNum),
+            MissingDigits = maps:from_list([{D,[]} || D <- Missing]),
+            maps:put(SqNum, {FreePos, MissingDigits}, Acc)
+        end,
+        #{},
+        lists:seq(1,Side)
+    ).
+
+sorted_occurrences(Sudoku) ->
+    Side = maps:get(side, Sudoku),
+    Empty = maps:from_list([{I, 0} || I <- lists:seq(1, Side)]),
+    Map = lists:foldl(
+        fun(I, Acc) -> count_digits_in_row(Sudoku, I, Acc) end,
+        Empty,
+        lists:seq(1,Side)
+    ),
+    lists:sort(fun({A1,A2},{B1,B2}) -> {A2,A1} >= {B2,B1} end,
+               maps:to_list(Map)).
+
+count_digits_in_row(Sudoku, N, DGCountMap) ->
+    lists:foldl(
+        fun (0, Acc) -> Acc;
+            (X, Acc) -> maps:update_with(X, fun(M) -> M+1 end, Acc)
+        end,
+        DGCountMap,
+        get_sudoku_row(Sudoku, N)
+    ).
+
+%%==============================================================================
+%% insert functions
+%%==============================================================================
+
+% function used to insert a number and possibily recursively insert more
 insert(Sudoku, Num, Pos, SquaresData) ->
 
     % fill Pos with Num in the Sudoku
     NewSudoku1 = maps:put(Pos, Num, Sudoku),
 
-    % check if it's invalid, it may happen because of guessing
+    % check if it's invalid (it may happen when guessing) or if we won
     case check_sudoku(NewSudoku1) of
         invalid -> throw(invalid_sudoku);
         full -> throw({win, NewSudoku1});
@@ -170,7 +229,7 @@ insert(Sudoku, Num, Pos, SquaresData) ->
     end,
 
     % remove Pos from FreePos in its quadrant. Also remove from MissingDigits
-    % all numbers found in Pos (Num included, it's ok).
+    % all numbers found in Pos (Num included).
     SqNum = get_square_from_pos(maps:get(sqrt, Sudoku), Pos),
     {FreePos, MissingDigits} = maps:get(SqNum, SquaresData),
     DigitsInPos = maps:get(Pos, FreePos),
@@ -238,24 +297,6 @@ insert(Sudoku, Num, Pos, SquaresData) ->
 
     {NewSudoku4, NewSquaresData6}.
 
-count_entries(Sudoku) ->
-    Side = maps:get(side, Sudoku),
-    N = lists:foldl(
-        fun(I, Acc) ->
-            Acc + length(lists:usort([X || X <- get_sudoku_row(Sudoku, I),
-                                     X =/= 0]))
-        end,
-        0,
-        lists:seq(1, Side)
-    ),
-    Dots = round((N * 100) / (Side*Side)),
-    print_dots(Dots).
-
-print_dots(0) ->
-    io:format("\n");
-print_dots(N) ->
-    io:format("."),
-    print_dots(N-1).
 
 check_row_missing_one_digit(Sudoku, Row) ->
     Side = maps:get(side, Sudoku),
@@ -280,7 +321,7 @@ check_col_missing_one_digit(Sudoku, Col) ->
     end.
 
 % positions start from 1
-find_first(N, [N|TL], Pos) -> Pos;
+find_first(N, [N|_TL], Pos) -> Pos;
 find_first(N, [_|TL], Pos) -> find_first(N, TL, Pos+1).
 
 check_can_insert_sq(Sudoku, SqNum, SquaresData) ->
@@ -361,69 +402,6 @@ update_squares_data(NSquare, Num, [NewPos|TL], SquaresData) ->
     ),
     update_squares_data(NSquare, Num, TL, NewData).
 
-% this function determines whether a number can go in a certain position inside
-% a square (assuming it is not already in the square) by looking at the row and
-% the column of the position.
-find_available_positions(Sudoku, Num, [], Acc) -> lists:reverse(Acc);
-find_available_positions(Sudoku, Num, [Pos={I,J}|TL], Acc) ->
-    case 
-        (check_rules([Num]++get_sudoku_row(Sudoku,I)) =/= invalid) and
-        (check_rules([Num]++get_sudoku_col(Sudoku,J)) =/= invalid) of
-
-        true -> find_available_positions(Sudoku, Num, TL, [Pos|Acc]);
-        false -> find_available_positions(Sudoku, Num, TL, Acc)
-    end.
-
-% this function builds a map that for every square holds
-% a tuple {FreePos, MissingDigits} where:
-% - FreePos is a map mapping free positions to a list of numbers that could
-%   take that position
-% - MissingDigits is a map mapping digits that are not present in the square
-%   to the list of positions that digit could take
-empty_squares_data(Sudoku) ->
-    Side = maps:get(side, Sudoku),
-    Sqrt = maps:get(sqrt, Sudoku),
-    lists:foldl(
-        fun(SqNum, Acc) ->
-            % generate all possible positions for the square and check
-            % whether they are empty or not
-            FirstRow = 1 + ((SqNum-1) div Sqrt) * Sqrt,
-            FirstCol = 1 + ((SqNum-1) rem Sqrt) * Sqrt,
-            FreePos = maps:from_list([
-                {{FirstRow+I, FirstCol+J}, []} ||
-                I <- lists:seq(0, Sqrt-1),
-                J <- lists:seq(0, Sqrt-1),
-                maps:get({FirstRow+I, FirstCol+J}, Sudoku) == 0
-            ]),
-            % missing digits are easy to find with -- operator
-            Missing = lists:seq(1,Side) -- get_sudoku_square(Sudoku, SqNum),
-            MissingDigits = maps:from_list([{D,[]} || D <- Missing]),
-            maps:put(SqNum, {FreePos, MissingDigits}, Acc)
-        end,
-        #{},
-        lists:seq(1,Side)
-    ).
-
-sorted_occurrences(Sudoku) ->
-    Side = maps:get(side, Sudoku),
-    Empty = maps:from_list([{I, 0} || I <- lists:seq(1, Side)]),
-    Map = lists:foldl(
-        fun(I, Acc) -> count_digits_in_row(Sudoku, I, Acc) end,
-        Empty,
-        lists:seq(1,Side)
-    ),
-    lists:sort(fun({A1,A2},{B1,B2}) -> {A2,A1} >= {B2,B1} end,
-               maps:to_list(Map)).
-
-count_digits_in_row(Sudoku, N, DGCountMap) ->
-    lists:foldl(
-        fun (0, Acc) -> Acc;
-            (X, Acc) -> maps:update_with(X, fun(M) -> M+1 end, Acc)
-        end,
-        DGCountMap,
-        get_sudoku_row(Sudoku, N)
-    ).
-
 %%==============================================================================
 %% get sudoku parts and check rules
 %%==============================================================================
@@ -443,7 +421,7 @@ check_sudoku(Sudoku) ->
     try check_sudoku0(Sudoku) of
         Res -> Res
     catch
-        Exception:invalid -> invalid
+        invalid -> invalid
     end.
 
 check_sudoku0(Sudoku) ->
