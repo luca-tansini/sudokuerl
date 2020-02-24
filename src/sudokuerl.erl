@@ -14,7 +14,7 @@
 %% escript Entry point
 main(Args) ->
     {In, Out} = case length(Args) of
-        1 -> {hd(Args), "solved"};
+        1 -> {hd(Args), none};
         2 -> {hd(Args), hd(tl(Args))};
         _ -> usage()
     end,
@@ -25,10 +25,15 @@ main(Args) ->
     catch
         {win, CompletedSudoku} ->
             io:format("Sudoku Completed!\n"),
-            print_sudoku(CompletedSudoku);
-            % TODO: also write to outfile
+            print_sudoku(CompletedSudoku),
+            case Out of
+                none -> ok;
+                _ ->
+                    {ok, Fd} = file:open(Out, write),
+                    print_sudoku(CompletedSudoku, Fd)
+            end;
         invalid_sudoku ->
-            io:format("The sudoku was incorrect (or something went wrong)\n")
+            io:format("The sudoku was incorrect\n")
     end,
     erlang:halt(0).
 
@@ -44,11 +49,27 @@ solve(Sudoku) ->
 solve_loop(Sudoku, [], SquaresData) ->
     % when we reach the end of the list it can only happen that
     % we have to guess between possibilites
-    % TODO: guessing part
-    todo_guessing;
-solve_loop(Sudoku, [{Num,_Occ}|TL], SquaresData) ->
+    
+    {Pos, Nums} = find_best_guess(SquaresData),
+    % io:format("guessing: ~p\n", [{Pos, Nums}]),
+    io:format("."),
 
-    % io:format("DEBUG: solve_loop with Num:~p~n", [Num]),
+    lists:foreach(
+        fun(Num) ->
+            try insert(Sudoku, Num, Pos, SquaresData) of
+                {NewSudoku, NewSquaresData} ->
+                    solve_loop(NewSudoku, [], NewSquaresData)
+            catch
+                invalid_sudoku ->
+                    % io:format("invalid, backtracking\n"),
+                    io:format("\b"),
+                    ok
+            end
+        end,
+        Nums
+    ),
+    invalid_sudoku;
+solve_loop(Sudoku, [{Num,_Occ}|TL], SquaresData) ->
 
     Side = maps:get(side, Sudoku),
     {NewSudoku, NewSquaresData} =
@@ -56,8 +77,6 @@ solve_loop(Sudoku, [{Num,_Occ}|TL], SquaresData) ->
 
     % recalculate the occurrences
     NewSortedOcc = sorted_occurrences(NewSudoku),
-
-    % io:format("DEBUG: NewSortedOcc: ~p~n", [NewSortedOcc]),
 
     case proplists:get_value(Num, NewSortedOcc) of
         Side ->
@@ -73,9 +92,21 @@ solve_loop(Sudoku, [{Num,_Occ}|TL], SquaresData) ->
     NewSortedOcc1 = [{N,Occ} || {N,Occ} <- NewSortedOcc,
                                 proplists:is_defined(N, TL)],
 
-    % io:format("DEBUG: NewSortedOcc1: ~p~n", [NewSortedOcc1]),
-
     solve_loop(NewSudoku, NewSortedOcc1, NewSquaresData).
+
+find_best_guess(SquaresData) ->
+    L = lists:foldl(
+        fun({_,{FreePos,_}}, Acc) ->
+            Acc ++ maps:to_list(FreePos)
+        end,
+        [],
+        maps:to_list(SquaresData)
+    ),
+    [Guess|_] = lists:sort(
+                    fun({PosA,DigitsA}, {PosB, DigitsB}) ->
+                        {length(DigitsA), PosA} =<  {length(DigitsB), PosB}
+                    end, L),
+    Guess.
 
 check_if_wrong(Num, SquaresData) ->
     case lists:foldl(
@@ -128,16 +159,15 @@ squares_loop(Sudoku, Num, NSquare, Side, SquaresData) ->
 
 insert(Sudoku, Num, Pos, SquaresData) ->
 
-    io:format("\n**************************************\n"),
-    io:format("insert(Sudoku, ~p, ~p, SquaresData)\n", [Num, Pos]),
-    io:format("where Sudoku:\n"),
-    print_sudoku(Sudoku),
-    % io:format("and SquaresData:\n"),
-    % io:format("~p~n", [SquaresData]),
-    io:format("**************************************\n"),
-
     % fill Pos with Num in the Sudoku
     NewSudoku1 = maps:put(Pos, Num, Sudoku),
+
+    % check if it's invalid, it may happen because of guessing
+    case check_sudoku(NewSudoku1) of
+        invalid -> throw(invalid_sudoku);
+        full -> throw({win, NewSudoku1});
+        ok -> ok
+    end,
 
     % remove Pos from FreePos in its quadrant. Also remove from MissingDigits
     % all numbers found in Pos (Num included, it's ok).
@@ -154,11 +184,22 @@ insert(Sudoku, Num, Pos, SquaresData) ->
         DigitsInPos
     ),
 
-    % completely remove Num from MissingDigit
-    MissingDigits2 = maps:remove(Num, MissingDigits1),
+    % completely remove Num from MissingDigit and at the same time
+    % remove from the square all occurrences of Num.
+    % Normally we don't need this, since we only insert when we are sure
+    % but when we guess we actually need to do this
+    {NumPositions, MissingDigits2} = maps:take(Num, MissingDigits1),
+
+    NewFreePos1 = lists:foldl(
+        fun(TmpPos, AccFreePos) ->
+            maps:update_with(TmpPos, fun(L) -> L -- [Num] end, AccFreePos)
+        end,
+        NewFreePos,
+        NumPositions -- [Pos]
+    ),
 
     NewSquaresData1 = 
-        maps:update(SqNum, {NewFreePos, MissingDigits2}, SquaresData),
+        maps:update(SqNum, {NewFreePos1, MissingDigits2}, SquaresData),
 
     % search all positions that share the row or column wih Pos and delete
     % Num from any FreePos found this way. If Num is found we also have to
@@ -185,9 +226,6 @@ insert(Sudoku, Num, Pos, SquaresData) ->
             _ -> {NewSudoku2, NewSquaresData4}
         end,
 
-    % io:format("DEBUG: NewSquaresData5:\n"),
-    % io:format("~p~n", [NewSquaresData5]),
-
     % search all squares for MissingDigits with only 1 entry.
     % When we find one, we recursively call insert
     {NewSudoku4, NewSquaresData6} = lists:foldl(
@@ -199,6 +237,25 @@ insert(Sudoku, Num, Pos, SquaresData) ->
     ),
 
     {NewSudoku4, NewSquaresData6}.
+
+count_entries(Sudoku) ->
+    Side = maps:get(side, Sudoku),
+    N = lists:foldl(
+        fun(I, Acc) ->
+            Acc + length(lists:usort([X || X <- get_sudoku_row(Sudoku, I),
+                                     X =/= 0]))
+        end,
+        0,
+        lists:seq(1, Side)
+    ),
+    Dots = round((N * 100) / (Side*Side)),
+    print_dots(Dots).
+
+print_dots(0) ->
+    io:format("\n");
+print_dots(N) ->
+    io:format("."),
+    print_dots(N-1).
 
 check_row_missing_one_digit(Sudoku, Row) ->
     Side = maps:get(side, Sudoku),
@@ -499,35 +556,38 @@ get_sudoku_side(SudokuMap) ->
     end.
 
 print_sudoku(Sudoku) ->
+    print_sudoku(Sudoku, standard_io).
+
+print_sudoku(Sudoku, Out) ->
     Side = maps:get(side, Sudoku),
     io:format("[~p x ~p]\n",[Side, Side]),
-    print_sudoku(Sudoku, 1, 1, Side).
+    print_sudoku(Sudoku, 1, 1, Side, Out).
 
-print_sudoku(Sudoku, Side, Side, Side)->
+print_sudoku(Sudoku, Side, Side, Side, Out)->
     Val = maps:get({Side, Side}, Sudoku),
     Format = "\~"++
              integer_to_list(round(1+math:floor(math:log10(Side))))
              ++"b~n",
-    io:format(Format, [Val]);
-print_sudoku(Sudoku, Row, Side, Side) ->
+    io:format(Out, Format, [Val]);
+print_sudoku(Sudoku, Row, Side, Side, Out) ->
     Val = maps:get({Row, Side}, Sudoku),
     Format = "\~"++
              integer_to_list(round(1+math:floor(math:log10(Side))))++
              "b~n",
-    io:format(Format, [Val]),
-    maybe_square_sep(Row, Side, "\n"),
-    print_sudoku(Sudoku, Row+1, 1, Side);
-print_sudoku(Sudoku, Row, Col, Side) ->
+    io:format(Out, Format, [Val]),
+    maybe_square_sep(Row, Side, "\n", Out),
+    print_sudoku(Sudoku, Row+1, 1, Side, Out);
+print_sudoku(Sudoku, Row, Col, Side, Out) ->
     Val = maps:get({Row, Col}, Sudoku),
     Format = "\~"++
              integer_to_list(round(1+math:floor(math:log10(Side))))++
              "b ",
-    io:format(Format, [Val]),
-    maybe_square_sep(Col, Side, " "),
-    print_sudoku(Sudoku, Row, Col+1, Side).
+    io:format(Out, Format, [Val]),
+    maybe_square_sep(Col, Side, " ", Out),
+    print_sudoku(Sudoku, Row, Col+1, Side, Out).
 
-maybe_square_sep(Col, Side, Str) ->
+maybe_square_sep(Col, Side, Str, Out) ->
     case Col rem round(math:sqrt(Side)) of
-        0 -> io:format(Str);
+        0 -> io:format(Out, Str, []);
         _ -> ok
     end.
